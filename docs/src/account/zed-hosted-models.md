@@ -152,18 +152,29 @@ Zed's plans offer hosted versions of major LLMs with higher rate limits than dir
 
 > **Warn:** Anthropic retains prompts and outputs sent to Claude Fable 5.2, Claude Fable 5.1, and Claude Fable 5 for at least 30 days for trust and safety purposes. The no-training commitment still applies, and Zed does not retain your prompts or outputs. See [Provider Safety Retention for Designated Models](../ai/privacy-and-security.md#provider-safety-retention).
 
+## Upcoming Anthropic Retirements {#upcoming-anthropic-retirements}
+
+Anthropic has announced these retirements on the Claude API. Both models are still available through Zed. Choose a replacement before the provider's retirement date.
+
+| Model             | Provider retirement date | Suggested replacement |
+| ----------------- | ------------------------ | --------------------- |
+| Claude Sonnet 4.5 | November 30, 2026        | Claude Sonnet 5.5     |
+| Claude Opus 4.5   | January 22, 2027         | Claude Opus 5.5       |
+
+See [Anthropic's model deprecations](https://platform.claude.com/docs/en/about-claude/model-deprecations) for provider retirement dates and migration guides.
+
 ## Recent Model Retirements {#recent-model-retirements}
 
 Zed no longer offers the models below:
 
-- Claude Opus 4.1 → Claude Opus 4.5, Claude Opus 4.6, Claude Opus 4.7, or Claude Opus 4.8
-- Claude Sonnet 4 → Claude Sonnet 4.5 or Claude Sonnet 4.6
-- Claude Sonnet 3.7 (retired February 19, 2026) → Claude Sonnet 4.5 or Claude Sonnet 4.6
-- GPT-5.1 and GPT-5 → GPT-5.2 or GPT-5.3-Codex
-- GPT-5.2-Codex (retired July 23, 2026) → GPT-5.3-Codex
-- Gemini 2.5 Pro → Gemini 3.1 Pro
-- Gemini 3 Pro (retired March 26, 2026) → Gemini 3.1 Pro
-- Gemini 2.5 Flash → Gemini 3 Flash or Gemini 3.5 Flash
+- Claude Opus 4.1 → Claude Opus 5.5
+- Claude Sonnet 4 → Claude Sonnet 5.5
+- Claude Sonnet 3.7 (retired February 19, 2026) → Claude Sonnet 5.5
+- GPT-5.1 and GPT-5 → GPT-6.2 Sol
+- GPT-5.2-Codex (retired July 23, 2026) → GPT-6.2 Sol
+- Gemini 2.5 Pro → Gemini 4 Carbon or Gemini 4 Neon
+- Gemini 3 Pro (retired March 26, 2026) → Gemini 4 Carbon or Gemini 4 Neon
+- Gemini 2.5 Flash → Gemini 4 Hydrogen
 - Grok 4, Grok 4 Fast, Grok 4 Fast (Non-Reasoning), and Grok Code Fast 1 ([retired May 15, 2026](https://docs.x.ai/developers/migration/may-15-retirement)). Zed no longer offers hosted xAI models.
 
 ## Usage {#usage}
@@ -175,6 +186,23 @@ For Claude Fable 5.2, the cache-write rate above is for the 5-minute cache. The 
 Fast mode for GPT-6.2 Astra and Sol is available on Zed Pro and Zed Business. It doubles all token rates, including cache writes and reads.
 
 Zed bills implicit cache hits for Gemini 4 at the cached-input rates above. Gemini 3 models do not use Google context caching and are billed only as input and output tokens, which preserves zero-data-retention behavior for those requests. For background, see Google's Vertex AI documentation on [context caching](https://cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview) and [zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention).
+
+Gemini 4 Argon's prices above are introductory rates through November 30, 2026.
+
+### Estimating Gemini Costs {#estimating-gemini-costs}
+
+Use the Zed prices in the table above. Count uncached input, cached input, and output separately, divide each token count by 1,000,000, and multiply by its rate. Cached input is part of your total input; do not also count it at the uncached-input rate.
+
+For example, a Gemini 4 Neon request with 100,000 uncached input tokens, 200,000 cached input tokens, and 10,000 output tokens costs:
+
+| Token type     | Tokens  | Zed price per 1M tokens | Cost   |
+| -------------- | ------- | ----------------------- | ------ |
+| Uncached input | 100,000 | $3.30                   | $0.330 |
+| Cached input   | 200,000 | $0.165                  | $0.033 |
+| Output         | 10,000  | $16.50                  | $0.165 |
+| Total          |         |                         | $0.528 |
+
+Cache hits depend on the provider. To estimate a request without cache savings, count all input at the uncached-input rate. Each request can include earlier messages and code context, so estimate from token usage rather than the length of your latest message alone.
 
 > LLMs can enter unproductive loops that require user intervention. Monitor longer-running tasks and interrupt if needed.
 
