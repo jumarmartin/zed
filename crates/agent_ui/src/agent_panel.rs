@@ -15251,4 +15251,420 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    async fn test_quick_ask_remembers_and_changes_agent(cx: &mut TestAppContext) {
+        use crate::quick_ask::{QuickAsk, QuickAskModal, SelectQuickAskAgent};
+
+        cx.update(crate::quick_ask::init);
+        let (workspace, panel, mut cx) = setup_workspace_panel(cx).await;
+        cx.update(|_, cx| install_custom_agent("project-assistant", cx));
+        cx.run_until_parked();
+
+        cx.dispatch_action(QuickAsk::default());
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(workspace.active_modal::<QuickAskModal>(cx).is_none());
+        });
+
+        cx.dispatch_action(QuickAsk::default());
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("project-assistant");
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(workspace.active_modal::<QuickAskModal>(cx).is_some());
+        });
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+
+        cx.dispatch_action(QuickAsk::default());
+        cx.run_until_parked();
+        cx.simulate_input("explain this");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            let view = panel.retained_threads.values().next().unwrap();
+            assert_eq!(view.read(cx).agent_key().id().as_ref(), "project-assistant");
+        });
+
+        cx.dispatch_action(QuickAsk {
+            agent: Some(Agent::NativeAgent.id()),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        cx.update(|_, cx| uninstall_custom_agent("project-assistant", cx));
+        cx.run_until_parked();
+        cx.dispatch_action(QuickAsk::default());
+        cx.run_until_parked();
+        assert!(
+            cx.has_pending_prompt(),
+            "an unavailable saved agent should prompt again"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        cx.dispatch_action(SelectQuickAskAgent);
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Zed Agent");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                KeyValueStore::global(cx)
+                    .read_kvp(crate::quick_ask::QUICK_ASK_AGENT_KEY)
+                    .unwrap()
+                    .as_deref(),
+                Some("Zed Agent")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_quick_ask_uses_requested_agent(cx: &mut TestAppContext) {
+        cx.update(crate::quick_ask::init);
+        let (workspace, panel, mut cx) = setup_workspace_panel(cx).await;
+        cx.update(|_, cx| install_custom_agent(agent_servers::CLAUDE_AGENT_ID, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::quick_ask::QuickAsk {
+            agent: Some("project-assistant".into()),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .active_modal::<crate::quick_ask::QuickAskModal>(cx)
+                    .is_none()
+            );
+        });
+
+        cx.update(|_, cx| install_custom_agent("project-assistant", cx));
+        cx.run_until_parked();
+        cx.dispatch_action(crate::quick_ask::QuickAsk {
+            agent: Some("project-assistant".into()),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.simulate_input("explain this");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.retained_threads.len(), 1);
+            let thread = panel.retained_threads.values().next().unwrap();
+            assert_eq!(
+                thread.read(cx).agent_key().id().as_ref(),
+                "project-assistant"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_quick_ask_starts_retained_thread_with_editor_context(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            crate::quick_ask::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree(
+            "/project",
+            json!({ "invoices.rs": "fn list() {}\n\nfn mark_paid() {}\n" }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        let _stub_connection =
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = Agent::Stub;
+        });
+
+        let editor = workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from("/project/invoices.rs"),
+                    workspace::OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([text::Point::new(2, 3)..text::Point::new(2, 3)]);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(crate::quick_ask::QuickAsk {
+            agent: Some(Agent::Stub.id()),
+            fast_model: Some("haiku".to_string()),
+            prewarm: false,
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .active_modal::<crate::quick_ask::QuickAskModal>(cx)
+                    .is_some(),
+                "QuickAsk should open its prompt"
+            );
+        });
+
+        cx.simulate_input("make an endpoint for this");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .active_modal::<crate::quick_ask::QuickAskModal>(cx)
+                    .is_none(),
+                "confirming should dismiss the prompt"
+            );
+        });
+
+        let message = panel.read_with(&cx, |panel, cx| {
+            assert!(
+                panel.active_conversation_view().is_none(),
+                "QuickAsk should not switch the panel to the new thread"
+            );
+            assert_eq!(panel.retained_threads.len(), 1);
+            let conversation_view = panel.retained_threads.values().next().unwrap();
+            let thread = conversation_view
+                .read(cx)
+                .root_thread(cx)
+                .expect("the stub agent should have connected");
+            thread.read(cx).to_markdown(cx)
+        });
+        assert!(message.contains("make an endpoint for this"), "{message}");
+        assert!(message.contains("invoices.rs"), "{message}");
+        assert!(message.contains("Cursor: line 3"), "{message}");
+        assert!(message.contains("fn mark_paid() {}"), "{message}");
+    }
+
+    #[gpui::test]
+    async fn test_quick_ask_escalates_to_default_model(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            crate::quick_ask::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "invoices.rs": "fn list() {}\n" }))
+            .await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+        let _stub_connection =
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = Agent::Stub;
+        });
+
+        cx.dispatch_action(crate::quick_ask::QuickAsk {
+            agent: Some(Agent::Stub.id()),
+            fast_model: Some("haiku".to_string()),
+            prewarm: false,
+        });
+        cx.run_until_parked();
+        cx.simulate_input("rework billing");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        let first_thread_id = panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.retained_threads.len(), 1);
+            let (thread_id, conversation_view) = panel.retained_threads.iter().next().unwrap();
+            let thread = conversation_view.read(cx).root_thread(cx).unwrap();
+            let transcript = thread.read(cx).to_markdown(cx);
+            assert!(
+                transcript.contains("You are the fast first pass"),
+                "{transcript}"
+            );
+            *thread_id
+        });
+
+        // `Agent::Stub` always answers "Default response", so the fast pass's request to
+        // escalate is appended by hand before the watcher's first poll.
+        panel.update(&mut cx, |panel, cx| {
+            let conversation_view = panel.retained_threads.get(&first_thread_id).unwrap();
+            let thread = conversation_view.read(cx).root_thread(cx).unwrap();
+            thread.update(cx, |thread, cx| {
+                thread
+                    .upsert_assistant_message(
+                        acp_v2::AgentMessage::new("escalate")
+                            .content(vec!["QUICK_ASK_ESCALATE: touches the auth layer".into()]),
+                        cx,
+                    )
+                    .unwrap();
+            });
+        });
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                !panel.retained_threads.contains_key(&first_thread_id),
+                "the fast thread should be replaced once it asks to escalate"
+            );
+            assert_eq!(panel.retained_threads.len(), 1);
+            let conversation_view = panel.retained_threads.values().next().unwrap();
+            let thread = conversation_view.read(cx).root_thread(cx).unwrap();
+            let transcript = thread.read(cx).to_markdown(cx);
+            assert!(transcript.contains("rework billing"), "{transcript}");
+            assert!(
+                !transcript.contains("QUICK_ASK_ESCALATE"),
+                "the escalated request should not carry the fast-pass instructions: {transcript}"
+            );
+        });
+    }
+
+    async fn open_quick_ask_with_prewarm(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentPanel>, VisualTestContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            crate::quick_ask::init(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "invoices.rs": "fn mark_paid() {}\n" }))
+            .await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = Agent::Stub;
+        });
+
+        workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from("/project/invoices.rs"),
+                    workspace::OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.dispatch_action(crate::quick_ask::QuickAsk {
+            agent: Some(Agent::Stub.id()),
+            fast_model: None,
+            prewarm: true,
+        });
+        cx.run_until_parked();
+        (panel, cx)
+    }
+
+    #[gpui::test]
+    async fn test_quick_ask_prewarm_receives_the_request(cx: &mut TestAppContext) {
+        let (panel, mut cx) = open_quick_ask_with_prewarm(cx).await;
+
+        let prewarmed_thread_id = panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.retained_threads.len(), 1);
+            let (thread_id, conversation_view) = panel.retained_threads.iter().next().unwrap();
+            let thread = conversation_view.read(cx).root_thread(cx).unwrap();
+            let transcript = thread.read(cx).to_markdown(cx);
+            assert!(transcript.contains("Get oriented now"), "{transcript}");
+            assert!(transcript.contains("fn mark_paid() {}"), "{transcript}");
+            *thread_id
+        });
+
+        cx.simulate_input("make an endpoint for this");
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(
+                panel.retained_threads.keys().copied().collect::<Vec<_>>(),
+                vec![prewarmed_thread_id],
+                "the request should go to the thread that was already reading"
+            );
+            let conversation_view = panel.retained_threads.values().next().unwrap();
+            let thread = conversation_view.read(cx).root_thread(cx).unwrap();
+            let transcript = thread.read(cx).to_markdown(cx);
+            assert!(transcript.contains("Get oriented now"), "{transcript}");
+            assert!(
+                transcript.contains("make an endpoint for this"),
+                "{transcript}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_quick_ask_prewarm_is_discarded_on_dismiss(cx: &mut TestAppContext) {
+        let (panel, mut cx) = open_quick_ask_with_prewarm(cx).await;
+        panel.read_with(&cx, |panel, _cx| {
+            assert_eq!(panel.retained_threads.len(), 1);
+        });
+
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.retained_threads.is_empty(),
+                "dismissing the prompt should drop the thread that was started for it"
+            );
+        });
+    }
 }

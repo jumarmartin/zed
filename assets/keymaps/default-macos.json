@@ -210,6 +210,13 @@
     },
   },
   {
+    "context": "!AcpThread > Editor && mode == full && !jupyter",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-shift-enter": ["agent::QuickAsk", { "prewarm": true }],
+    },
+  },
+  {
     "context": "Editor && jupyter",
     "use_key_equivalents": true,
     "bindings": {

@@ -3,8 +3,8 @@ use editor::Editor;
 use extension_host::{ExtensionOperation, ExtensionStore};
 use futures::StreamExt;
 use gpui::{
-    App, Context, Entity, EventEmitter, InteractiveElement as _, ParentElement as _, Render,
-    SharedString, Styled, Task, Window, actions,
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, InteractiveElement as _,
+    ParentElement as _, Render, SharedString, Styled, Task, Window, actions,
 };
 use language::{
     BinaryStatus, LanguageServerId, LanguageServerName, LanguageServerStatusUpdate, ServerHealth,
@@ -18,6 +18,7 @@ use std::{
     cmp::Reverse,
     collections::HashSet,
     fmt::Write,
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,8 +44,76 @@ pub enum Event {
     },
 }
 
+/// Work that other crates run in the background and want shown in the status bar
+/// next to language server progress.
+pub struct BackgroundActivity {
+    pub project: EntityId,
+    pub message: SharedString,
+    pub on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackgroundActivityId(usize);
+
+#[derive(Default)]
+pub struct BackgroundActivities {
+    next_id: usize,
+    activities: Vec<(BackgroundActivityId, BackgroundActivity)>,
+}
+
+struct GlobalBackgroundActivities(Entity<BackgroundActivities>);
+
+impl Global for GlobalBackgroundActivities {}
+
+impl BackgroundActivities {
+    pub fn global(cx: &mut App) -> Entity<Self> {
+        if let Some(global) = cx.try_global::<GlobalBackgroundActivities>() {
+            return global.0.clone();
+        }
+        let activities = cx.new(|_| Self::default());
+        cx.set_global(GlobalBackgroundActivities(activities.clone()));
+        activities
+    }
+
+    pub fn start(
+        &mut self,
+        activity: BackgroundActivity,
+        cx: &mut Context<Self>,
+    ) -> BackgroundActivityId {
+        let id = BackgroundActivityId(self.next_id);
+        self.next_id += 1;
+        self.activities.push((id, activity));
+        cx.notify();
+        id
+    }
+
+    pub fn set_message(
+        &mut self,
+        id: BackgroundActivityId,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((_, activity)) = self
+            .activities
+            .iter_mut()
+            .find(|(activity_id, _)| *activity_id == id)
+            && activity.message != message
+        {
+            activity.message = message;
+            cx.notify();
+        }
+    }
+
+    pub fn finish(&mut self, id: BackgroundActivityId, cx: &mut Context<Self>) {
+        self.activities
+            .retain(|(activity_id, _)| *activity_id != id);
+        cx.notify();
+    }
+}
+
 pub struct ActivityIndicator {
     statuses: Vec<ServerStatus>,
+    background_activities: Entity<BackgroundActivities>,
     project: Entity<Project>,
     context_menu_handle: PopoverMenuHandle<ContextMenu>,
     fs_jobs: Vec<fs::JobInfo>,
@@ -229,8 +298,13 @@ impl ActivityIndicator {
             )
             .detach();
 
+            let background_activities = BackgroundActivities::global(cx);
+            cx.observe(&background_activities, |_, _, cx| cx.notify())
+                .detach();
+
             let mut this = Self {
                 statuses: Vec::new(),
+                background_activities,
                 project: project.clone(),
                 context_menu_handle: PopoverMenuHandle::default(),
                 fs_jobs: Vec::new(),
@@ -403,6 +477,38 @@ impl ActivityIndicator {
                 })),
                 tooltip_message: None,
             });
+        }
+        {
+            let project_id = self.project.entity_id();
+            let mut activities = self
+                .background_activities
+                .read(cx)
+                .activities
+                .iter()
+                .filter(|(_, activity)| activity.project == project_id)
+                .map(|(_, activity)| activity);
+            if let Some(activity) = activities.next() {
+                let mut message = activity.message.to_string();
+                let on_click = activity.on_click.clone();
+                let additional_count = activities.count();
+                if additional_count > 0 {
+                    message.push_str(&format!(" + {additional_count} more"));
+                }
+                return Some(Content {
+                    icon: ActivityIcon::LoadingSpinner,
+                    message,
+                    on_click: on_click.map(|on_click| {
+                        // The handler only ever runs on the foreground thread; `Arc` is
+                        // used solely to match the type of the other click handlers.
+                        #[allow(clippy::arc_with_non_send_sync)]
+                        let on_click: Arc<
+                            dyn Fn(&mut Self, &mut Window, &mut Context<Self>),
+                        > = Arc::new(move |_, window, cx| on_click(window, cx));
+                        on_click
+                    }),
+                    tooltip_message: None,
+                });
+            }
         }
         // Show any language server has pending activity.
         {
